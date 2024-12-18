@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-interface IERC721 {
-    function transferFrom(address from, address to, uint256 tokenId) external;
-    function ownerOf(uint256 tokenId) external view returns (address);
-}
+import "./interfaces/IERC721.sol";
 
 // @title NFT Marketplace with auction functionality
 // @notice This contract implements a marketplace for NFTs with direct sale and auction features
@@ -35,15 +32,20 @@ contract Marketplace {
     event AuctionFinished(uint256 tokenId, address winner, uint256 amount);
     event AuctionCanceled(uint256 tokenId);
 
-    constructor(address _nftContract) {
+    constructor() {}
+
+    // @notice Sets the NFT contract address
+    // @param _nftContract The address of the NFT contract
+    function setNFTContract(address _nftContract) external {
         nftContract = IERC721(_nftContract);
     }
 
-    // @notice Creates a new item in the marketplace
-    // @param tokenId The ID of the NFT to be created
+    // @notice Creates a new NFT item by minting it
+    // @param tokenId The ID of the NFT to be minted
     function createItem(uint256 tokenId) external {
-        require(nftContract.ownerOf(tokenId) == msg.sender, "Not token owner");
-        nftContract.transferFrom(msg.sender, address(this), tokenId);
+        // Mint new NFT directly to the creator
+        nftContract.mint(msg.sender, tokenId);
+        // Set the original creator as the item owner
         itemOwners[tokenId] = msg.sender;
         emit ItemCreated(msg.sender, tokenId);
     }
@@ -54,6 +56,8 @@ contract Marketplace {
     function listItem(uint256 tokenId, uint256 price) external {
         require(itemOwners[tokenId] == msg.sender, "Not owner");
         require(price > 0, "Price must be greater than 0");
+        // Check if marketplace is approved to transfer the token
+        require(nftContract.getApproved(tokenId) == address(this), "Marketplace not approved");
         itemPrices[tokenId] = price;
         emit ItemListed(tokenId, price);
     }
@@ -78,7 +82,8 @@ contract Marketplace {
         itemOwners[tokenId] = msg.sender;
         delete itemPrices[tokenId];
 
-        nftContract.transferFrom(address(this), msg.sender, tokenId);
+        // Transfer NFT from seller to buyer using marketplace's approval
+        nftContract.transferFrom(seller, msg.sender, tokenId);
         payable(seller).transfer(msg.value);
         emit ItemSold(msg.sender, tokenId, price);
     }
@@ -88,6 +93,10 @@ contract Marketplace {
     function listItemOnAuction(uint256 tokenId) external {
         require(itemOwners[tokenId] == msg.sender, "Not owner");
         require(!auctions[tokenId].active, "Auction already active");
+        require(nftContract.getApproved(tokenId) == address(this), "Marketplace not approved");
+
+        // Transfer NFT to marketplace for auction
+        nftContract.transferFrom(msg.sender, address(this), tokenId);
 
         auctions[tokenId] = Auction({
             seller: msg.sender,
@@ -134,6 +143,7 @@ contract Marketplace {
             emit AuctionFinished(tokenId, auction.highestBidder, auction.highestBid);
         } else {
             // Return NFT to seller, refund the last bid
+            nftContract.transferFrom(address(this), auction.seller, tokenId);
             if (auction.highestBidder != address(0)) {
                 payable(auction.highestBidder).transfer(auction.highestBid);
             }

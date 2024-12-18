@@ -1,10 +1,12 @@
 import { HardhatUserConfig } from "hardhat/config";
 import "@nomiclabs/hardhat-ethers";
+import "@nomicfoundation/hardhat-verify";
 import "@nomicfoundation/hardhat-chai-matchers";
 import "@typechain/hardhat";
 import "hardhat-gas-reporter";
 import "solidity-coverage";
 import * as dotenv from "dotenv";
+import "./tasks/mint";
 
 dotenv.config();
 
@@ -19,7 +21,12 @@ const config: HardhatUserConfig = {
   gasReporter: {
     enabled: true,
     currency: "USD"
-  }
+  },
+  etherscan: {
+    apiKey: {
+      sepolia: "T5BPZSP6FNKUR9GVEDCN5C4UEJTWKE3B7T", 
+    },
+  },
 };
 
 export default config;

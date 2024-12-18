@@ -6,6 +6,7 @@ typechain
 cache
 artifacts
 ignition
+hardhat.config.ts
 
 # Hardhat files
 /cache

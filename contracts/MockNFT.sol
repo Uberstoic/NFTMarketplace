@@ -8,16 +8,32 @@ contract MockNFT {
     mapping(address => mapping(address => bool)) private _operatorApprovals;
     mapping(uint256 => address) private _tokenApprovals;
     
+    address public marketplace;
+
     event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
 
+    modifier onlyMarketplace() {
+        require(msg.sender == marketplace, "Only marketplace can call this");
+        _;
+    }
+
+    constructor() {}
+
+    function setMarketplace(address _marketplace) external {
+        require(marketplace == address(0), "Marketplace already set");
+        require(_marketplace != address(0), "Invalid marketplace address");
+        marketplace = _marketplace;
+    }
+
     // @notice Mints a new token
+    // @param to The address that will own the minted token
     // @param tokenId The ID of the token to mint
-    function mint(uint256 tokenId) external {
+    function mint(address to, uint256 tokenId) external onlyMarketplace {
         require(ownerOf[tokenId] == address(0), "Token already exists");
-        ownerOf[tokenId] = msg.sender;
-        emit Transfer(address(0), msg.sender, tokenId);
+        ownerOf[tokenId] = to;
+        emit Transfer(address(0), to, tokenId);
     }
 
     // @notice Transfers a token from one address to another
@@ -37,22 +53,22 @@ contract MockNFT {
         emit Transfer(from, to, tokenId);
     }
 
-    // @notice Approves an address to transfer a specific token
-    // @param to Address to be approved for the given token ID
-    // @param tokenId ID of the token to be approved
+    // @notice Gets the approved address for a token ID
+    // @param tokenId The ID of the token to query the approval of
+    // @return The currently approved address for the given token ID
+    function getApproved(uint256 tokenId) public view returns (address) {
+        require(ownerOf[tokenId] != address(0), "Token does not exist");
+        return _tokenApprovals[tokenId];
+    }
+
+    // @notice Approves another address to transfer the given token ID
+    // @param to The address to be approved for the given token ID
+    //param tokenId The ID of the token to be approved
     function approve(address to, uint256 tokenId) external {
         address owner = ownerOf[tokenId];
         require(msg.sender == owner || isApprovedForAll(owner, msg.sender), "Not authorized");
         _tokenApprovals[tokenId] = to;
         emit Approval(owner, to, tokenId);
-    }
-
-    // @notice Gets the approved address for a token ID
-    // @param tokenId ID of the token to query the approval of
-    // @return Address currently approved for the given token ID
-    function getApproved(uint256 tokenId) public view returns (address) {
-        require(ownerOf[tokenId] != address(0), "Token does not exist");
-        return _tokenApprovals[tokenId];
     }
 
     // @notice Sets or unsets the approval of a given operator

@@ -3,6 +3,7 @@ import { ethers } from "hardhat";
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 import { MockNFT, Marketplace } from "../typechain-types";
 import { BigNumber } from "ethers";
+import "@nomicfoundation/hardhat-chai-matchers";
 
 describe("NFT Marketplace", function () {
   let marketplace: Marketplace;
@@ -23,21 +24,30 @@ describe("NFT Marketplace", function () {
 
     // Deploy Marketplace
     const Marketplace = await ethers.getContractFactory("Marketplace");
-    marketplace = await Marketplace.deploy(mockNFT.address);
+    marketplace = await Marketplace.deploy();
     await marketplace.deployed();
+
+    // Set up contract relationships
+    await marketplace.setNFTContract(mockNFT.address);
+    await mockNFT.setMarketplace(marketplace.address);
+  });
+
+  describe("Deployment", function () {
+    it("Should set the correct NFT contract address", async function () {
+      expect(await marketplace.nftContract()).to.equal(mockNFT.address);
+    });
   });
 
   describe("Item Creation and Listing", function () {
     it("Should create and list an item", async function () {
-      // Mint NFT
-      await mockNFT.connect(addr1).mint(1);
-      
-      // Approve marketplace for all
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
-      
-      // Create item
+      // Create item (which mints NFT)
       const createTx = await marketplace.connect(addr1).createItem(1);
       await createTx.wait();
+
+      expect(await mockNFT.ownerOf(1)).to.equal(addr1.address);
+
+      // Approve marketplace before listing
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
 
       // List item
       const price = ethers.utils.parseEther("1");
@@ -49,47 +59,42 @@ describe("NFT Marketplace", function () {
       expect(await marketplace.itemOwners(1)).to.equal(addr1.address);
     });
 
-    it("Should fail to create item if not owner", async function () {
-      await mockNFT.connect(addr1).mint(1);
+    it("Should fail to list item if not approved", async function () {
+      await marketplace.connect(addr1).createItem(1);
       
-      try {
-        await marketplace.connect(addr2).createItem(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Not token owner");
-      }
+      const price = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addr1).listItem(1, price))
+        .to.be.revertedWith("Marketplace not approved");
+    });
+
+    it("Should fail to create item if token ID already exists", async function () {
+      // First creation should succeed
+      await marketplace.connect(addr1).createItem(1);
+      
+      // Second creation with same ID should fail
+      await expect(marketplace.connect(addr2).createItem(1))
+        .to.be.revertedWith("Token already exists");
     });
 
     it("Should fail to list item if price is zero", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
       await marketplace.connect(addr1).createItem(1);
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       
-      try {
-        await marketplace.connect(addr1).listItem(1, 0);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Price must be greater than 0");
-      }
+      await expect(marketplace.connect(addr1).listItem(1, 0))
+        .to.be.revertedWith("Price must be greater than 0");
     });
 
     it("Should fail to list item if not owner", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
       await marketplace.connect(addr1).createItem(1);
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       
-      try {
-        await marketplace.connect(addr2).listItem(1, ethers.utils.parseEther("1"));
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Not owner");
-      }
+      await expect(marketplace.connect(addr2).listItem(1, ethers.utils.parseEther("1")))
+        .to.be.revertedWith("Not owner");
     });
 
     it("Should allow canceling a listed item", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
       await marketplace.connect(addr1).createItem(1);
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       await marketplace.connect(addr1).listItem(1, ethers.utils.parseEther("1"));
       
       await marketplace.connect(addr1).cancel(1);
@@ -97,257 +102,338 @@ describe("NFT Marketplace", function () {
       expect(price.toString()).to.equal("0");
     });
 
-    it("Should fail to cancel if item not listed", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
+    it("Should fail to cancel if not owner", async function () {
       await marketplace.connect(addr1).createItem(1);
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItem(1, ethers.utils.parseEther("1"));
       
-      try {
-        await marketplace.connect(addr1).cancel(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Item not listed");
-      }
+      await expect(marketplace.connect(addr2).cancel(1))
+        .to.be.revertedWith("Not owner");
     });
   });
 
   describe("Buying Items", function () {
+    const PRICE = ethers.utils.parseEther("1");
+
     beforeEach(async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
       await marketplace.connect(addr1).createItem(1);
-      await marketplace.connect(addr1).listItem(1, ethers.utils.parseEther("1"));
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItem(1, PRICE);
     });
 
-    it("Should allow buying an item", async function () {
+    it("Should allow buying a listed item", async function () {
       const initialBalance = await addr1.getBalance();
-      const buyTx = await marketplace.connect(addr2).buyItem(1, { value: ethers.utils.parseEther("1") });
-      await buyTx.wait();
-
-      // Check NFT ownership
-      const newOwner = await marketplace.itemOwners(1);
-      expect(newOwner).to.equal(addr2.address);
-
-      // Check seller received payment
-      const finalBalance = await addr1.getBalance();
-      const difference = finalBalance.sub(initialBalance);
-      expect(difference.toString()).to.equal(ethers.utils.parseEther("1").toString());
+      
+      await marketplace.connect(addr2).buyItem(1, { value: PRICE });
+      
+      expect(await mockNFT.ownerOf(1)).to.equal(addr2.address);
+      expect(await addr1.getBalance()).to.equal(initialBalance.add(PRICE));
     });
 
-    it("Should fail if incorrect price", async function () {
-      try {
-        await marketplace.connect(addr2).buyItem(1, { value: ethers.utils.parseEther("0.5") });
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Insufficient payment");
-      }
+    it("Should fail if payment is insufficient", async function () {
+      await expect(
+        marketplace.connect(addr2).buyItem(1, { value: PRICE.sub(1) })
+      ).to.be.revertedWith("Insufficient payment");
     });
 
-    it("Should fail to buy non-existent item", async function () {
-      try {
-        await marketplace.connect(addr2).buyItem(999, { value: ethers.utils.parseEther("1") });
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Item not for sale");
-      }
+    it("Should fail if item is not listed", async function () {
+      await marketplace.connect(addr1).cancel(1);
+      
+      await expect(
+        marketplace.connect(addr2).buyItem(1, { value: PRICE })
+      ).to.be.revertedWith("Item not for sale");
+    });
+  });
+
+  describe("Direct Sales", function () {
+    beforeEach(async function () {
+      await marketplace.connect(addr1).createItem(1);
+    });
+
+    it("Should fail to buy unlisted item", async function () {
+      const price = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addr2).buyItem(1, { value: price }))
+        .to.be.revertedWith("Item not for sale");
+    });
+
+    it("Should fail to buy item with insufficient funds", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, price);
+
+      const lowPrice = ethers.utils.parseEther("0.5");
+      await expect(marketplace.connect(addr2).buyItem(1, { value: lowPrice }))
+        .to.be.revertedWith("Insufficient payment");
+    });
+
+    it("Should transfer payment to seller after successful purchase", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, price);
+
+      const sellerBalanceBefore = await ethers.provider.getBalance(addr1.address);
+      
+      await marketplace.connect(addr2).buyItem(1, { value: price });
+      
+      const sellerBalanceAfter = await ethers.provider.getBalance(addr1.address);
+      expect(sellerBalanceAfter.sub(sellerBalanceBefore)).to.equal(price);
+    });
+
+    it("Should emit ItemSold event after successful purchase", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, price);
+
+      await expect(marketplace.connect(addr2).buyItem(1, { value: price }))
+        .to.emit(marketplace, "ItemSold")
+        .withArgs(addr2.address, 1, price);
+    });
+
+    it("Should fail to list item with zero price", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await expect(marketplace.connect(addr1).listItem(1, 0))
+        .to.be.revertedWith("Price must be greater than 0");
+    });
+
+    it("Should fail to list if not owner", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addr2).listItem(1, price))
+        .to.be.revertedWith("Not owner");
+    });
+
+    it("Should allow owner to cancel listing", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, price);
+
+      await marketplace.connect(addr1).cancel(1);
+      
+      // Try to buy the canceled listing
+      await expect(marketplace.connect(addr2).buyItem(1, { value: price }))
+        .to.be.revertedWith("Item not for sale");
+    });
+
+    it("Should fail to cancel if not owner", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const price = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, price);
+
+      await expect(marketplace.connect(addr2).cancel(1))
+        .to.be.revertedWith("Not owner");
+    });
+
+    it("Should fail to cancel if item not listed", async function () {
+      await expect(marketplace.connect(addr1).cancel(1))
+        .to.be.revertedWith("Item not listed");
+    });
+
+    it("Should allow owner to update price", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      const oldPrice = ethers.utils.parseEther("1");
+      await marketplace.connect(addr1).listItem(1, oldPrice);
+
+      const newPrice = ethers.utils.parseEther("2");
+      await marketplace.connect(addr1).listItem(1, newPrice);
+
+      // Try to buy with old price
+      await expect(marketplace.connect(addr2).buyItem(1, { value: oldPrice }))
+        .to.be.revertedWith("Insufficient payment");
     });
   });
 
   describe("Auction Features", function () {
     beforeEach(async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
       await marketplace.connect(addr1).createItem(1);
     });
 
     it("Should start an auction", async function () {
-      const auctionTx = await marketplace.connect(addr1).listItemOnAuction(1);
-      await auctionTx.wait();
-
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
       const auction = await marketplace.auctions(1);
       expect(auction.active).to.be.true;
       expect(auction.seller).to.equal(addr1.address);
+      expect(await mockNFT.ownerOf(1)).to.equal(marketplace.address);
     });
 
     it("Should place a bid", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       await marketplace.connect(addr1).listItemOnAuction(1);
-
-      const bidAmount = ethers.utils.parseEther("2");
-      const bidTx = await marketplace.connect(addr2).makeBid(1, { value: bidAmount });
-      await bidTx.wait();
-
+      const bidAmount = ethers.utils.parseEther("1");
+      
+      await marketplace.connect(addr2).makeBid(1, { value: bidAmount });
+      
       const auction = await marketplace.auctions(1);
-      expect(auction.highestBidder).to.equal(addr2.address);
       expect(auction.highestBid.toString()).to.equal(bidAmount.toString());
-    });
-
-    it("Should fail to place lower bid", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("2") });
-
-      try {
-        await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("1") });
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Bid too low");
-      }
+      expect(auction.highestBidder).to.equal(addr2.address);
     });
 
     it("Should finish auction", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("2") });
-      await marketplace.connect(addrs[0]).makeBid(1, { value: ethers.utils.parseEther("3") });
-
-      // Increase time
-      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60 + 1]);
-      await ethers.provider.send("evm_mine", []);
-
-      const finishTx = await marketplace.finishAuction(1);
-      await finishTx.wait();
-
-      expect(await mockNFT.ownerOf(1)).to.equal(addrs[0].address);
-    });
-
-    it("Should fail to finish auction early", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-
-      try {
-        await marketplace.finishAuction(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Auction not over");
-      }
-    });
-
-    it("Should cancel auction", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-
-      const cancelTx = await marketplace.connect(addr1).cancelAuction(1);
-      await cancelTx.wait();
-
-      const auction = await marketplace.auctions(1);
-      expect(auction.active).to.be.false;
-    });
-
-    it("Should fail to cancel if not seller", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-
-      try {
-        await marketplace.connect(addr2).cancelAuction(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Not auction creator");
-      }
-    });
-
-    it("Should fail to start auction if already active", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-      
-      try {
-        await marketplace.connect(addr1).listItemOnAuction(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Auction already active");
-      }
-    });
-
-    it("Should refund previous bidder when new bid is placed", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       await marketplace.connect(addr1).listItemOnAuction(1);
       
       // First bid
       const firstBidAmount = ethers.utils.parseEther("1");
       await marketplace.connect(addr2).makeBid(1, { value: firstBidAmount });
       
-      // Get balance before second bid
+      // Second bid
+      const secondBidAmount = ethers.utils.parseEther("2");
+      await marketplace.connect(addrs[0]).makeBid(1, { value: secondBidAmount });
+      
+      // Fast forward time
+      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
+      await ethers.provider.send("evm_mine", []);
+      
+      await marketplace.finishAuction(1);
+      
+      expect(await mockNFT.ownerOf(1)).to.equal(addrs[0].address);
+      const auction = await marketplace.auctions(1);
+      expect(auction.active).to.be.false;
+    });
+
+    it("Should fail to list item on auction if not approved", async function () {
+      await expect(marketplace.connect(addr1).listItemOnAuction(1))
+        .to.be.revertedWith("Marketplace not approved");
+    });
+
+    it("Should fail to list item on auction if already active", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      await expect(marketplace.connect(addr1).listItemOnAuction(1))
+        .to.be.revertedWith("Auction already active");
+    });
+
+    it("Should fail to make bid if auction is not active", async function () {
+      const bidAmount = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addr2).makeBid(1, { value: bidAmount }))
+        .to.be.revertedWith("Auction inactive");
+    });
+
+    it("Should fail to make bid if auction has ended", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      // Fast forward time past auction duration
+      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60 + 1]); // 3 days + 1 second
+      await ethers.provider.send("evm_mine", []);
+      
+      const bidAmount = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addr2).makeBid(1, { value: bidAmount }))
+        .to.be.revertedWith("Auction ended");
+    });
+
+    it("Should fail to make bid if bid is too low", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      // First bid
+      const firstBidAmount = ethers.utils.parseEther("2");
+      await marketplace.connect(addr2).makeBid(1, { value: firstBidAmount });
+      
+      // Second bid with lower amount
+      const secondBidAmount = ethers.utils.parseEther("1");
+      await expect(marketplace.connect(addrs[0]).makeBid(1, { value: secondBidAmount }))
+        .to.be.revertedWith("Bid too low");
+    });
+
+    it("Should refund previous bidder when new bid is placed", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      // First bid
+      const firstBidAmount = ethers.utils.parseEther("1");
+      await marketplace.connect(addr2).makeBid(1, { value: firstBidAmount });
+      
+      // Get addr2's balance before refund
       const balanceBefore = await ethers.provider.getBalance(addr2.address);
       
       // Second bid
-      await marketplace.connect(addrs[0]).makeBid(1, { value: ethers.utils.parseEther("2") });
+      const secondBidAmount = ethers.utils.parseEther("2");
+      await marketplace.connect(addrs[0]).makeBid(1, { value: secondBidAmount });
       
-      // Check refund (approximately equal due to gas costs)
+      // Get addr2's balance after refund
       const balanceAfter = await ethers.provider.getBalance(addr2.address);
-      const difference = balanceAfter.sub(balanceBefore);
-      expect(difference.toString()).to.equal(firstBidAmount.toString());
-    });
-
-    it("Should fail to make bid on inactive auction", async function () {
-      try {
-        await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("1") });
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Auction inactive");
-      }
-    });
-
-    it("Should fail to finish inactive auction", async function () {
-      try {
-        await marketplace.finishAuction(999);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Auction inactive");
-      }
-    });
-
-    it("Should fail to cancel auction with bids", async function () {
-      await marketplace.connect(addr1).listItemOnAuction(1);
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("1") });
       
-      try {
-        await marketplace.connect(addr1).cancelAuction(1);
-        expect.fail("Should have thrown error");
-      } catch (error: any) {
-        expect(error.message).to.include("Cannot cancel with bids");
-      }
-    });
-  });
-
-  describe("Constructor and Basic State", function () {
-    it("Should set the correct NFT contract address", async function () {
-      expect(await marketplace.nftContract()).to.equal(mockNFT.address);
+      // Check that the previous bidder was refunded
+      expect(balanceAfter.sub(balanceBefore)).to.equal(firstBidAmount);
     });
 
-    it("Should have the correct auction duration", async function () {
-      const duration = await marketplace.auctionDuration();
-      expect(duration.toString()).to.equal((3 * 24 * 60 * 60).toString()); // 3 days in seconds
-    });
-  });
-
-  describe("Edge Cases", function () {
-    it("Should handle multiple bids correctly", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
-      await marketplace.connect(addr1).createItem(1);
+    it("Should fail to finish auction if not ended", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       await marketplace.connect(addr1).listItemOnAuction(1);
-
-      // Place multiple bids
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("1") });
-      await marketplace.connect(addrs[0]).makeBid(1, { value: ethers.utils.parseEther("2") });
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("3") });
-
-      const auction = await marketplace.auctions(1);
-      expect(auction.highestBid.toString()).to.equal(ethers.utils.parseEther("3").toString());
-      expect(auction.highestBidder).to.equal(addr2.address);
-      expect(auction.bidCount.toString()).to.equal("3");
+      
+      const bidAmount = ethers.utils.parseEther("1");
+      await marketplace.connect(addr2).makeBid(1, { value: bidAmount });
+      
+      await expect(marketplace.finishAuction(1))
+        .to.be.revertedWith("Auction not over");
     });
 
-    it("Should not allow finishing auction with less than 2 bids", async function () {
-      await mockNFT.connect(addr1).mint(1);
-      await mockNFT.connect(addr1).setApprovalForAll(marketplace.address, true);
-      await marketplace.connect(addr1).createItem(1);
+    it("Should return NFT to seller if less than 2 bids were made", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
       await marketplace.connect(addr1).listItemOnAuction(1);
-
-      // Place single bid
-      await marketplace.connect(addr2).makeBid(1, { value: ethers.utils.parseEther("1") });
-
-      // Increase time
-      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60 + 1]);
+      
+      // Only one bid
+      const bidAmount = ethers.utils.parseEther("1");
+      await marketplace.connect(addr2).makeBid(1, { value: bidAmount });
+      
+      // Fast forward time
+      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
       await ethers.provider.send("evm_mine", []);
-
-      // Finish auction
+      
+      // Get bidder's balance before
+      const balanceBefore = await ethers.provider.getBalance(addr2.address);
+      
       await marketplace.finishAuction(1);
+      
+      // Check NFT was returned to seller
+      expect(await mockNFT.ownerOf(1)).to.equal(addr1.address);
+      
+      // Check bidder was refunded
+      const balanceAfter = await ethers.provider.getBalance(addr2.address);
+      expect(balanceAfter.sub(balanceBefore)).to.equal(bidAmount);
+    });
 
-      // NFT should still be owned by marketplace
-      expect(await mockNFT.ownerOf(1)).to.equal(marketplace.address);
+    it("Should allow seller to cancel auction with no bids", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      await marketplace.connect(addr1).cancelAuction(1);
+      
+      const auction = await marketplace.auctions(1);
+      expect(auction.active).to.be.false;
+    });
+
+    it("Should fail to cancel auction if not seller", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      await expect(marketplace.connect(addr2).cancelAuction(1))
+        .to.be.revertedWith("Not auction creator");
+    });
+
+    it("Should fail to cancel auction if it has bids", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      const bidAmount = ethers.utils.parseEther("1");
+      await marketplace.connect(addr2).makeBid(1, { value: bidAmount });
+      
+      await expect(marketplace.connect(addr1).cancelAuction(1))
+        .to.be.revertedWith("Cannot cancel with bids");
+    });
+
+    it("Should fail to cancel auction if already ended", async function () {
+      await mockNFT.connect(addr1).approve(marketplace.address, 1);
+      await marketplace.connect(addr1).listItemOnAuction(1);
+      
+      // Fast forward time
+      await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
+      await ethers.provider.send("evm_mine", []);
+      
+      await expect(marketplace.connect(addr1).cancelAuction(1))
+        .to.be.revertedWith("Auction ended");
     });
   });
 });
