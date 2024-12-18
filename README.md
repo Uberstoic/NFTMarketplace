@@ -14,5 +14,5 @@ The marketplace includes:
 - Smart contract security measures
 
 ## Deployed Smart Contract Address::
-MockNFT: [https://sepolia.etherscan.io/address/0xeb760a49b81b190f4bd0a851d6ee8b9628500cf3#code]
-Marketplace: [https://sepolia.etherscan.io/address/0xf254E0393510d8a5561277DF694094023213193e#code]
+MockNFT: [https://sepolia.etherscan.io/address/0x0028536af74b5fDC9F9950882c3AAb8ef18a7D97#code]
+Marketplace: [https://sepolia.etherscan.io/address/0x3B72feCe8464127781995b39A53Fa810F3d1D553#code]
